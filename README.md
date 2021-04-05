@@ -8,4 +8,4 @@ Pipeline starts with reads filtering using fastp (can be skipped if not required
 Hisat2 is used for alignement and the transcripts are assembled using stringtie.
 The read counts for assembled transcripts are counted using htseq-count
 
-All required tools are installable using conda
+All required tools are installable using conda.
