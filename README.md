@@ -1,2 +1,3 @@
 # RNAseq
-An automated script for analysing RNA sequencing data
+An automated BASH script for analysing RNA sequencing data
+
