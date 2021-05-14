@@ -1,0 +1,140 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+Working_directory=$(pwd)
+verbose='false'
+
+print_usage() {
+	echo -e "\nUsage : bash alignment -i Input_directory -o Output_directory -r reference_genome [Optional parameters]\n"
+	echo -e "[Required parameters]:\n"
+	echo "-i : Directory containing FASTQ files"
+	echo "-r : Path of reference genome (FASTA file)"
+	echo "-g : Path of GTF file"
+	echo "-h : User menu"
+	echo "-p : Number of processors"
+	echo -e "\n[Optional parameters]:\n"
+	echo "-q : Skip fastp quality filtering [Y]"
+	echo -e "\nTOOLS USED - fastp, hisat2, stringtie, r-tximport\n"
+	echo -e "NOTE - Run the pipeline in a clean folder for a smoooth run\n"
+} 
+	
+while getopts "i:o:r:g:p:q:h" flag;
+do
+	case "${flag}" in
+	h)
+	  print_usage
+	  exit 0
+	  ;;
+	i) Sample_directory=${OPTARG};;
+	r) reference_genome=${OPTARG};;
+	p) cores=${OPTARG};;
+	q) qc=${OPTARG};;
+	g) gtf=${OPTARG};;	
+	\?)
+	echo -e "\nInvalid option in input\n"
+	exit;;
+	*) echo -e "Provide required arguements or type -h for help\n";;
+	esac
+done
+
+if [[ ${qc} == "Y" ]] ;
+then 
+	echo -e "\nSkipping quality control, proceeding to alignment"
+	ln -s $Sample_directory ${Working_directory}/Quality_control
+else
+	echo -e "\n----------Quality control started----------\n"
+	mkdir -p Quality_control	
+	cd $Sample_directory	
+	for f in `ls *_1.fastq.gz | sed 's/_1.fastq.gz//g' | sort -u` ; do
+		if [[ -s ${Working_directory}/Quality_control/${f}_1.fastq.gz && -s ${Working_directory}/Quality_control/${f}_2.fastq.gz ]] ;
+		then
+			echo -e "${f} paired-end reads exists\n"
+		else		
+			echo "QC running for ${f}"
+			fastp -i ${f}_1.fastq.gz -I ${f}_2.fastq.gz \
+			-o ${Working_directory}/Quality_control/${f}_1.fastq.gz -O ${Working_directory}/Quality_control/${f}_2.fastq.gz \
+			--detect_adapter_for_pe \
+			--qualified_quality_phred 30 \
+			--thread $cores \
+			--length_required 70 \
+			--json ${Working_directory}/Quality_control/${f}.json \
+			--html ${Working_directory}/Quality_control/${f}.html \
+			&> ${Working_directory}/Quality_control/${f}.log
+		fi
+	done
+fi
+	
+if [[ -s ${reference_genome}.1.ht2 ]] ;
+then
+	echo -e "\nDatabase index already exists\n"
+
+elif [[ -s ${Working_directory}/Hisat_Index/reference.1.ht2 ]]
+then
+	echo -e "\nDatabase index already exists\n"
+
+else
+	mkdir ${Working_directory}/Hisat_Index
+	cd ${Working_directory}/Hisat_Index/
+	echo -e "\n----------Building alignment index----------"
+	hisat2-build -p ${cores} ${reference_genome} ${Working_directory}/Hisat_Index/reference &> ${Working_directory}/Hisat_Index/index.log
+	echo -e "\nIndex is ready\n"
+fi
+
+echo -e "----------Proceeding with alignment----------\n"
+
+mkdir -p ${Working_directory}/Alignment
+cd ${Working_directory}/Quality_control/
+for f in `ls *_1.fastq.gz | sed 's/_1.fastq.gz//g' | sort -u` ; do
+	if [[ -e ${Working_directory}/Alignment/${f}_sorted.bam && -s ${Working_directory}/Alignment/${f}_sorted.bam ]];
+	then
+		echo -e "${f} alignment record exists\n"
+	else
+		echo -e "\nAligning ${f} against reference\n"
+		hisat2 -p ${cores} -x ${Working_directory}/Hisat_Index/reference -1 ${f}_1.fastq.gz -2 ${f}_2.fastq.gz | samtools view -bS -@ ${cores} - | samtools sort -@ ${cores} -O BAM -o ${Working_directory}/Alignment/${f}_sorted.bam &> ${Working_directory}/Alignment/${f}.log
+	fi
+done
+
+echo -e "\n----------Proceeding with assembly----------\n"
+
+mkdir -p ${Working_directory}/Assembly
+cd ${Working_directory}/Alignment
+for f in `ls *_sorted.bam | sed 's/_sorted.bam//g' | sort -u` ; do
+	mkdir -p ${Working_directory}/Assembly/${f}
+	if [[ -e ${Working_directory}/Assembly/${f}/transcripts.gtf && -s ${Working_directory}/Assembly/${f}/transcripts.gtf ]];
+	then
+		echo -e "${f} assembly exists\n"	
+	else
+		echo -e "Building transcript assembly for ${f}\n"
+		cd ${Working_directory}/Assembly/${f}
+		stringtie -B -e -p ${cores} -l ${f} -G ${gtf} -o transcripts.gtf -A gene_abundances.tsv ${Working_directory}/Alignment/${f}_sorted.bam
+	fi
+done
+
+cd ${Working_directory}/Assembly
+for f in `ls` ; do
+	echo -e "${f}\t"${Working_directory}/Assembly/${f}/transcripts.gtf >> ${Working_directory}/path_gtf.txt	
+	echo "${f}" >> path
+done
+
+cd ..
+Rscript ${SCRIPT_DIR}/tximport.R
+
+prepDE.py -i ${Working_directory}/path_gtf.txt -g gene_count_matrix.csv -t transcript_count_matrix.csv -l 145
+
+echo -e "\nRead counts complete\n"
+
+cd ${Working_directory}/Assembly
+find -name '*transcripts.gtf' > ${Working_directory}/assembly.txt
+
+echo -e "----------Merging assemblies----------\n"
+if [[ -s ${Working_directory}/Assembly/merged.gtf ]] ;
+then
+	echo -e "Merged assembly found\n"
+else
+	stringtie --merge -G ${gtf} -o ${Working_directory}/Assembly/merged.gtf ${Working_directory}/assembly.txt
+	echo -e "Merged assembly saved in ${Working_directory}/Assembly\n"
+fi
+
+echo -e "\n----------Pipeline complete----------\n"
